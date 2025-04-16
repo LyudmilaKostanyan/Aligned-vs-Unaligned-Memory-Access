@@ -62,6 +62,20 @@ Unaligned +24       250012504           2559.3850
 
 ---
 
+### Why Aligned Access Can Be Slower on Some Systems
+
+Although aligned access is generally faster, in **some environments (especially Windows or Apple Silicon)**, it may appear slower due to:
+
+- **Memory prefetchers**: CPUs often detect patterns and fetch unaligned memory speculatively, minimizing the usual cost.
+- **AVX load instructions (x86)**: On modern Intel CPUs, `_mm256_loadu_pd` is nearly as fast as `_mm256_load_pd` if the data does not cross a cache-line boundary.
+- **NEON load instructions (ARM)**: On Apple Silicon and other ARM platforms, unaligned memory access is often supported natively without a significant penalty, especially if access patterns are predictable or do not cross page/cache boundaries.
+- **Memory mapping and OS-level behavior**: Some OS or memory allocators place aligned memory into areas with lower access speed or cause page faults more frequently than smaller offsets.
+- **Branch prediction and measurement noise**: Since the data is random, subtle differences in pipeline usage, NUMA regions, or speculative execution can distort timing.
+
+In short, **you are still comparing meaningful access patterns**, but real-world performance can be affected by many layers below the code. As a result, **aligned access is not always the fastest**, particularly on modern CPUs with advanced memory and execution engines.
+
+--- 
+
 ## How to Compile and Run
 
 ### 1. Clone the Repository
