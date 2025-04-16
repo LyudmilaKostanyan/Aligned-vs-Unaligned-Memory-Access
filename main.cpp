@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <ctime>
 #include "kaizen.h"
 
 #if defined(__AVX__)
@@ -21,7 +22,7 @@
 #include <intrin.h>
 #endif
 
-size_t SIZE = 100'000'000;
+size_t SIZE = 500'000'000;
 constexpr size_t MAX_OFFSET = 32;
 
 size_t get_cache_line_size() {
@@ -43,6 +44,14 @@ void print_result(const std::string& label, double sum, double time_ms) {
               << std::setw(20) << std::fixed << std::setprecision(0) << sum
               << std::setw(15) << std::fixed << std::setprecision(4) << time_ms
               << "\n";
+}
+
+void flush_cpu_cache(size_t flush_size = 10 * 1024 * 1024) {
+    std::vector<char> trash(flush_size, 1);
+    volatile char sink = 0;
+    for (size_t i = 0; i < trash.size(); i += 64) {
+        sink ^= trash[i];
+    }
 }
 
 #if USE_AVX
@@ -119,7 +128,6 @@ int main(int argc, char** argv) {
 
     double* aligned_data = static_cast<double*>(raw);
 
-    // Fill aligned_data with random doubles between 0.0 and 1.0
     std::srand(static_cast<unsigned>(std::time(nullptr)));
     for (size_t i = 0; i < SIZE; ++i) {
         aligned_data[i] = static_cast<double>(std::rand()) / RAND_MAX;
@@ -134,12 +142,13 @@ int main(int argc, char** argv) {
     std::cout << std::string(55, '-') << "\n";
 
     double sum_result = 0.0;
+
+    flush_cpu_cache();
     double time_taken = measure_time(simd_sum, aligned_data, true, sum_result);
     print_result("Aligned", sum_result, time_taken);
 
     std::vector<size_t> offsets = {1, 2, 4, 8, 16, 24};
     for (size_t offset : offsets) {
-        // Allocate separate memory for each unaligned version
 #if defined(_WIN32)
         void* raw_unaligned = _aligned_malloc(SIZE * sizeof(double) + MAX_OFFSET, 32);
         if (!raw_unaligned) continue;
@@ -151,9 +160,9 @@ int main(int argc, char** argv) {
         double* unaligned_data = reinterpret_cast<double*>(
             reinterpret_cast<char*>(base) + offset);
 
-        // Copy the same randomized data
         std::memcpy(unaligned_data, aligned_data, SIZE * sizeof(double));
 
+        flush_cpu_cache();
         sum_result = 0.0;
         time_taken = measure_time(simd_sum, unaligned_data, false, sum_result);
         print_result("Unaligned +" + std::to_string(offset), sum_result, time_taken);
