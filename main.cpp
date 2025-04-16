@@ -118,7 +118,12 @@ int main(int argc, char** argv) {
 #endif
 
     double* aligned_data = static_cast<double*>(raw);
-    std::fill(aligned_data, aligned_data + SIZE, 1.0);
+
+    // Fill aligned_data with random doubles between 0.0 and 1.0
+    std::srand(static_cast<unsigned>(std::time(nullptr)));
+    for (size_t i = 0; i < SIZE; ++i) {
+        aligned_data[i] = static_cast<double>(std::rand()) / RAND_MAX;
+    }
 
     std::cout << "Array size: " << SIZE << "\n\n";
     std::cout << std::left
@@ -134,13 +139,30 @@ int main(int argc, char** argv) {
 
     std::vector<size_t> offsets = {1, 2, 4, 8, 16, 24};
     for (size_t offset : offsets) {
-        const double* unaligned_data = reinterpret_cast<const double*>(reinterpret_cast<const char*>(aligned_data) + offset);
-        std::vector<double> temp(SIZE, 1.0);
-        std::memcpy((void*)unaligned_data, temp.data(), SIZE * sizeof(double));
+        // Allocate separate memory for each unaligned version
+#if defined(_WIN32)
+        void* raw_unaligned = _aligned_malloc(SIZE * sizeof(double) + MAX_OFFSET, 32);
+        if (!raw_unaligned) continue;
+#else
+        void* raw_unaligned = nullptr;
+        if (posix_memalign(&raw_unaligned, 32, SIZE * sizeof(double) + MAX_OFFSET) != 0) continue;
+#endif
+        double* base = static_cast<double*>(raw_unaligned);
+        double* unaligned_data = reinterpret_cast<double*>(
+            reinterpret_cast<char*>(base) + offset);
+
+        // Copy the same randomized data
+        std::memcpy(unaligned_data, aligned_data, SIZE * sizeof(double));
 
         sum_result = 0.0;
         time_taken = measure_time(simd_sum, unaligned_data, false, sum_result);
         print_result("Unaligned +" + std::to_string(offset), sum_result, time_taken);
+
+#if defined(_WIN32)
+        _aligned_free(raw_unaligned);
+#else
+        free(raw_unaligned);
+#endif
     }
 
 #if defined(_WIN32)
