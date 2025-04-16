@@ -4,12 +4,15 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
-#include <immintrin.h>
 
-#if defined(_WIN32)
-#include <intrin.h>
-#elif defined(__unix__) || defined(__APPLE__)
-#include <unistd.h>
+#if defined(__AVX__)
+    #include <immintrin.h>
+    #define USE_AVX 1
+#elif defined(__ARM_NEON) || defined(__ARM_NEON__)
+    #include <arm_neon.h>
+    #define USE_NEON 1
+#else
+    #define USE_SCALAR 1
 #endif
 
 constexpr size_t SIZE = 100'000'000;
@@ -22,9 +25,10 @@ size_t get_cache_line_size() {
     return ((cpuInfo[1] >> 8) & 0xFF) * 8;
 #elif defined(_SC_LEVEL1_DCACHE_LINESIZE)
     long line_size = sysconf(_SC_LEVEL1_DCACHE_LINESIZE);
-    if (line_size > 0) return static_cast<size_t>(line_size);
-#endif
+    return line_size > 0 ? static_cast<size_t>(line_size) : 64;
+#else
     return 64;
+#endif
 }
 
 void print_result(const std::string& label, double sum, double time_ms) {
@@ -35,83 +39,88 @@ void print_result(const std::string& label, double sum, double time_ms) {
               << "\n";
 }
 
-double aligned_sum(const double* data) {
+#if USE_AVX
+double simd_sum(const double* data, bool aligned) {
     __m256d sum = _mm256_setzero_pd();
     for (size_t i = 0; i < SIZE; i += 4) {
-        __m256d v = _mm256_load_pd(data + i);
+        __m256d v = aligned ? _mm256_load_pd(data + i) : _mm256_loadu_pd(data + i);
         sum = _mm256_add_pd(sum, v);
     }
     double result[4];
     _mm256_storeu_pd(result, sum);
     return result[0] + result[1] + result[2] + result[3];
 }
-
-double unaligned_sum(const double* data) {
-    __m256d sum = _mm256_setzero_pd();
+#elif USE_NEON
+double simd_sum(const double* data, bool /*aligned*/) {
+    float64x2_t sum0 = vdupq_n_f64(0.0), sum1 = vdupq_n_f64(0.0);
     for (size_t i = 0; i < SIZE; i += 4) {
-        __m256d v = _mm256_loadu_pd(data + i);
-        sum = _mm256_add_pd(sum, v);
+        float64x2_t v0 = vld1q_f64(data + i);
+        float64x2_t v1 = vld1q_f64(data + i + 2);
+        sum0 = vaddq_f64(sum0, v0);
+        sum1 = vaddq_f64(sum1, v1);
     }
-    double result[4];
-    _mm256_storeu_pd(result, sum);
-    return result[0] + result[1] + result[2] + result[3];
+    float64x2_t total = vaddq_f64(sum0, sum1);
+    return vgetq_lane_f64(total, 0) + vgetq_lane_f64(total, 1);
 }
+#else
+double simd_sum(const double* data, bool /*aligned*/) {
+    double sum = 0.0;
+    for (size_t i = 0; i < SIZE; ++i)
+        sum += data[i];
+    return sum;
+}
+#endif
 
-double measure_time(double (*func)(const double*), const double* data, double& sum_out) {
+double measure_time(double (*func)(const double*, bool), const double* data, bool aligned, double& sum_out) {
     auto start = std::chrono::high_resolution_clock::now();
-    sum_out = func(data);
+    sum_out = func(data, aligned);
     auto end = std::chrono::high_resolution_clock::now();
     return std::chrono::duration<double, std::milli>(end - start).count();
 }
 
 int main() {
-    size_t ALIGNMENT = get_cache_line_size();
-    std::cout << "\nDetected cache line size: " << ALIGNMENT << " bytes\n";
+#if USE_AVX
+    std::cout << "[INFO] Using AVX intrinsics (x86_64)\n";
+#elif USE_NEON
+    std::cout << "[INFO] Using NEON intrinsics (ARM/Apple Silicon)\n";
+#else
+    std::cout << "[INFO] Using scalar fallback\n";
+#endif
 
-    if (ALIGNMENT < 32) ALIGNMENT = 32;
+    std::cout << "Detected cache line size: " << get_cache_line_size() << " bytes\n";
 
 #if defined(_WIN32)
-    void* raw = _aligned_malloc(SIZE * sizeof(double) + MAX_OFFSET, ALIGNMENT);
-    if (!raw) {
-        std::cerr << "Failed to allocate aligned memory\n";
-        return 1;
-    }
+    void* raw = _aligned_malloc(SIZE * sizeof(double) + MAX_OFFSET, 32);
+    if (!raw) return 1;
 #else
     void* raw = nullptr;
-    if (posix_memalign(&raw, ALIGNMENT, SIZE * sizeof(double) + MAX_OFFSET) != 0) {
-        std::cerr << "Failed to allocate aligned memory\n";
-        return 1;
-    }
+    if (posix_memalign(&raw, 32, SIZE * sizeof(double) + MAX_OFFSET) != 0) return 1;
 #endif
 
     double* aligned_data = static_cast<double*>(raw);
     std::fill(aligned_data, aligned_data + SIZE, 1.0);
 
-    double aligned_sum_result = 0.0;
-    double time_aligned = measure_time(aligned_sum, aligned_data, aligned_sum_result);
-
-    std::cout << "Array size (iterations): " << SIZE << "\n\n";
+    std::cout << "\nArray size: " << SIZE << "\n\n";
     std::cout << std::left
               << std::setw(20) << "Access Type"
               << std::setw(20) << "Sum"
               << std::setw(15) << "Time (ms)"
               << "\n";
-    std::cout << std::string(50, '-') << "\n";
+    std::cout << std::string(55, '-') << "\n";
 
-    print_result("Aligned", aligned_sum_result, time_aligned);
+    double sum_result = 0.0;
+    double time_taken = measure_time(simd_sum, aligned_data, true, sum_result);
+    print_result("Aligned", sum_result, time_taken);
 
     std::vector<size_t> offsets = {1, 2, 4, 8, 16, 24};
     for (size_t offset : offsets) {
         const double* unaligned_data = reinterpret_cast<const double*>(reinterpret_cast<const char*>(aligned_data) + offset);
-
         std::vector<double> temp(SIZE, 1.0);
         std::memcpy((void*)unaligned_data, temp.data(), SIZE * sizeof(double));
 
-        double sum_result = 0.0;
-        double time_taken = measure_time(unaligned_sum, unaligned_data, sum_result);
-
-        std::string label = "Unaligned +" + std::to_string(offset);
-        print_result(label, sum_result, time_taken);
+        sum_result = 0.0;
+        time_taken = measure_time(simd_sum, unaligned_data, false, sum_result);
+        print_result("Unaligned +" + std::to_string(offset), sum_result, time_taken);
     }
 
 #if defined(_WIN32)
