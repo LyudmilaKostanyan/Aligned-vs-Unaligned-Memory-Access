@@ -4,6 +4,8 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <string>
+#include "kaizen.h"
 
 #if defined(__AVX__)
     #include <immintrin.h>
@@ -15,11 +17,15 @@
     #define USE_SCALAR 1
 #endif
 
-constexpr size_t SIZE = 100'000'000;
+#if defined(_WIN32) && defined(_MSC_VER)
+#include <intrin.h>
+#endif
+
+size_t SIZE = 100'000'000;
 constexpr size_t MAX_OFFSET = 32;
 
 size_t get_cache_line_size() {
-#if defined(_WIN32)
+#if defined(_WIN32) && defined(_MSC_VER)
     int cpuInfo[4];
     __cpuid(cpuInfo, 1);
     return ((cpuInfo[1] >> 8) & 0xFF) * 8;
@@ -72,19 +78,33 @@ double simd_sum(const double* data, bool /*aligned*/) {
 #endif
 
 double measure_time(double (*func)(const double*, bool), const double* data, bool aligned, double& sum_out) {
-    auto start = std::chrono::high_resolution_clock::now();
+    zen::timer timer;
+    timer.start();
     sum_out = func(data, aligned);
-    auto end = std::chrono::high_resolution_clock::now();
-    return std::chrono::duration<double, std::milli>(end - start).count();
+    timer.stop();
+    return timer.duration<zen::timer::usec>().count() / 1000.0;
 }
 
-int main() {
+void parse_args(int argc, char** argv) {
+    for (int i = 1; i < argc - 1; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--n") {
+            size_t parsed = std::stoull(argv[i + 1]);
+            if (parsed > 0)
+                SIZE = parsed;
+        }
+    }
+}
+
+int main(int argc, char** argv) {
+    parse_args(argc, argv);
+
 #if USE_AVX
-    std::cout << "[INFO] Using AVX intrinsics (x86_64)\n";
+    std::cout << "\n[INFO] Using AVX intrinsics (x86_64)\n";
 #elif USE_NEON
-    std::cout << "[INFO] Using NEON intrinsics (ARM/Apple Silicon)\n";
+    std::cout << "\n[INFO] Using NEON intrinsics (ARM/Apple Silicon)\n";
 #else
-    std::cout << "[INFO] Using scalar fallback\n";
+    std::cout << "\n[INFO] Using scalar fallback\n";
 #endif
 
     std::cout << "Detected cache line size: " << get_cache_line_size() << " bytes\n";
@@ -100,7 +120,7 @@ int main() {
     double* aligned_data = static_cast<double*>(raw);
     std::fill(aligned_data, aligned_data + SIZE, 1.0);
 
-    std::cout << "\nArray size: " << SIZE << "\n\n";
+    std::cout << "Array size: " << SIZE << "\n\n";
     std::cout << std::left
               << std::setw(20) << "Access Type"
               << std::setw(20) << "Sum"
